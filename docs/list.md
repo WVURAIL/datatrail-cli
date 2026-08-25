@@ -106,22 +106,22 @@ Within Datatrail, there are two types of datasets:
     Please see the CLI reference page for more information on the `list` command:
     [datatrail list](../cli/#datatrail-list)
 
-## 🔎 Finding datasets with `--match` and `--expand`
+## Finding datasets with `--match` and `--expand`
 
 Navigating the hierarchy one name at a time gets slow when you do not know
-where a dataset lives. `--match` filters the larger datasets of a scope — or
-of **every** scope, when no scope is given — by one or more comma-separated,
+where a dataset lives. `--match` filters the larger datasets of a scope, or
+of **every** scope when no scope is given, by one or more comma-separated,
 case-insensitive terms, which must all appear in the combined
 `scope dataset` text:
 
 ```shell
 $> datatrail ls chime.acquisition.processed --match gains
       Datatrail: Dataset Map
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
-┃ Scope                       ┃ Dataset       ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
-│ chime.acquisition.processed │ complex_gains │
-└─────────────────────────────┴───────────────┘
++-----------------------------+---------------+
+| Scope                       | Dataset       |
++-----------------------------+---------------+
+| chime.acquisition.processed | complex_gains |
++-----------------------------+---------------+
 ```
 
 A hit may be a container whose children are the datasets you actually want.
@@ -132,15 +132,15 @@ its own row:
 ```shell
 $> datatrail ls --match gain --expand
                     Datatrail: Dataset Map
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
-┃ Scope                       ┃ Dataset       ┃ Parent        ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
-│ chime.acquisition.processed │ complex_gains │               │
-├─────────────────────────────┼───────────────┼───────────────┤
-│ gbo.acquisition.processed   │ 20230716      │ complex_gains │
-│ gbo.acquisition.processed   │ 20230715      │ complex_gains │
-│ ...                         │ ...           │ ...           │
-└─────────────────────────────┴───────────────┴───────────────┘
++-----------------------------+---------------+---------------+
+| Scope                       | Dataset       | Parent        |
++-----------------------------+---------------+---------------+
+| chime.acquisition.processed | complex_gains |               |
++-----------------------------+---------------+---------------+
+| gbo.acquisition.processed   | 20230716      | complex_gains |
+| gbo.acquisition.processed   | 20230715      | complex_gains |
+| ...                         | ...           | ...           |
++-----------------------------+---------------+---------------+
 ```
 
 Rows reached through a parent resolve directly with
