@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import click
 
+from dtcli.locking import output_lock
 from dtcli.src import functions
 
 SCHEMA = "datatrail.inventory/v1"
@@ -113,24 +114,26 @@ def build_inventory(
 ) -> Dict[str, Any]:
     """Build or resume an inventory manifest."""
     selection = _selection(scope, match, parent)
-    manifest = _load_manifest(output, selection)
-    rows, discovery_failures = _discover(selection, verbose, quiet)
-    manifest["discovery_failures"] = discovery_failures
-    _merge_rows(manifest, rows)
-    _set_complete(manifest)
-    _write_manifest(output, manifest)
-
-    for entry in manifest["datasets"]:
-        if entry["status"] in FINISHED_STATUSES:
-            continue
-        replacement = _inspect_dataset(entry, verbose, quiet)
-        entry.clear()
-        entry.update(replacement)
+    output = output.resolve()
+    with output_lock(output):
+        manifest = _load_manifest(output, selection)
+        rows, discovery_failures = _discover(selection, verbose, quiet)
+        manifest["discovery_failures"] = discovery_failures
+        _merge_rows(manifest, rows)
         _set_complete(manifest)
         _write_manifest(output, manifest)
 
-    _set_complete(manifest)
-    _write_manifest(output, manifest)
+        for entry in manifest["datasets"]:
+            if entry["status"] in FINISHED_STATUSES:
+                continue
+            replacement = _inspect_dataset(entry, verbose, quiet)
+            entry.clear()
+            entry.update(replacement)
+            _set_complete(manifest)
+            _write_manifest(output, manifest)
+
+        _set_complete(manifest)
+        _write_manifest(output, manifest)
     return manifest
 
 

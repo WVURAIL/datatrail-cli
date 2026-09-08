@@ -286,3 +286,45 @@ def test_inventory_help() -> None:
     assert "--parent" in result.output
     assert "--output" in result.output
     assert "--allow-incomplete" in result.output
+
+
+def test_inventory_excludes_writer_before_discovery(tmp_path: Path, monkeypatch) -> None:
+    """An overlapping selection cannot replace the first run's inventory."""
+    output = tmp_path / "inventory.json"
+    calls = []
+
+    def discover(**kwargs):
+        calls.append(kwargs["scope"])
+        competing = CliRunner().invoke(
+            inventory_command.inventory,
+            ["second.scope", "--output", str(output)],
+        )
+        assert competing.exit_code == 1
+        assert "already in use" in competing.output
+        assert not output.exists()
+        return {"results": [], "failed": []}
+
+    monkeypatch.setattr(inventory_command.functions, "discover_datasets", discover)
+    saved = inventory_command.build_inventory("first.scope", None, None, output)
+
+    assert calls == ["first.scope"]
+    assert saved["selection"]["scope"] == "first.scope"
+    assert json.loads(output.read_text()) == saved
+
+
+def test_inventory_preserves_output_symlink(tmp_path: Path, monkeypatch) -> None:
+    """Atomic writes and ownership both use the symlink's canonical target."""
+    output = tmp_path / "inventory.json"
+    alias = tmp_path / "alias.json"
+    try:
+        alias.symlink_to(output)
+    except OSError:
+        pytest.skip("This platform does not permit creating symlinks")
+    monkeypatch.setattr(
+        inventory_command.functions,
+        "discover_datasets",
+        lambda **kwargs: {"results": [], "failed": []},
+    )
+    saved = inventory_command.build_inventory("first.scope", None, None, alias)
+    assert alias.is_symlink()
+    assert json.loads(output.read_text()) == saved
