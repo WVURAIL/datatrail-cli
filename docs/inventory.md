@@ -28,6 +28,11 @@ dataset query. A rerun with the same selection reuses `ready` and `empty`
 entries, then retries `pending` and `failed` entries. A different selection is
 refused so unrelated inventories cannot be mixed.
 
+Only one inventory command may own an output at a time. A competing run exits
+with an error before reading or changing the manifest, including when a symlink
+refers to the same output. Ownership is released when the process exits. Leave
+the hidden `.lock` file in place; its presence does not mean a run is active.
+
 An inventory with any failed discovery branch or file query exits nonzero.
 `--allow-incomplete` keeps the incomplete manifest but exits zero when a caller
 wants to inspect or process the available subset.

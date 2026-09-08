@@ -249,3 +249,94 @@ def test_command_is_registered() -> None:
     assert result.exit_code == 0
     assert "MANIFEST" in result.output
     assert "--cores" in result.output
+
+
+@pytest.mark.parametrize("shared", ["state", "directory", "alias"])
+def test_competing_command_cannot_change_active_transfer(
+    tmp_path: Path, monkeypatch, shared: str
+) -> None:
+    """Shared state or a destination is rejected before preparation or download."""
+    manifest = tmp_path / "inventory.json"
+    directory = tmp_path / "data"
+    state = tmp_path / "pull.json"
+    write_inventory(manifest, ["file.dat"])
+    other_directory = directory if shared != "state" else tmp_path / "other-data"
+    other_state = state if shared == "state" else tmp_path / "other-pull.json"
+    if shared == "alias":
+        other_directory = tmp_path / "alias"
+        try:
+            other_directory.symlink_to(directory, target_is_directory=True)
+        except OSError:
+            pytest.skip("This platform does not permit creating symlinks")
+
+    def unexpected_download(**kwargs):
+        pytest.fail("A competing transfer started downloading")
+
+    monkeypatch.setattr(pull_manifest_module.cadcclient, "pget", unexpected_download)
+    with pull_manifest_module.transfer_session(manifest, directory, state):
+        original = state.read_bytes()
+        result = CliRunner().invoke(
+            pull_manifest_module.pull_manifest,
+            [
+                str(manifest),
+                "-d",
+                str(other_directory),
+                "--state",
+                str(other_state),
+                "-f",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "already in use" in result.output
+        assert state.read_bytes() == original
+        if other_state != state:
+            assert not other_state.exists()
+        assert not (directory / "file.dat").exists()
+
+
+def test_command_holds_locks_through_download_and_releases_after_interrupt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Interruption releases both locks and permits a resumable retry."""
+    manifest = tmp_path / "inventory.json"
+    directory = tmp_path / "data"
+    state = tmp_path / "pull.json"
+    write_inventory(manifest, ["file.dat"])
+
+    def interrupted_download(**kwargs):
+        with pytest.raises(OSError, match="already in use"):
+            with pull_manifest_module.transfer_session(
+                manifest, directory, tmp_path / "other.json"
+            ):
+                pytest.fail("The command released its destination too soon")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(pull_manifest_module.cadcclient, "pget", interrupted_download)
+    arguments = [str(manifest), "-d", str(directory), "--state", str(state), "-f"]
+    result = CliRunner().invoke(pull_manifest_module.pull_manifest, arguments)
+    assert result.exit_code == 1
+    assert json.loads(state.read_text())["complete"] is False
+
+    def download(source, destination, processors, verbose):
+        Path(destination[0]).write_bytes(b"complete")
+        return []
+
+    monkeypatch.setattr(pull_manifest_module.cadcclient, "pget", download)
+    resumed = CliRunner().invoke(pull_manifest_module.pull_manifest, arguments)
+    assert resumed.exit_code == 0, resumed.output
+    assert json.loads(state.read_text())["complete"] is True
+    assert (directory / "file.dat").read_bytes() == b"complete"
+
+
+def test_failed_second_lock_releases_first_lock(tmp_path: Path) -> None:
+    """A refused session cannot strand another state or destination lock."""
+    manifest = tmp_path / "inventory.json"
+    directory = tmp_path / "data"
+    state = tmp_path / "a-state.json"
+    write_inventory(manifest, ["file.dat"])
+    with pull_manifest_module.output_lock(directory / "datatrail-pull"):
+        with pytest.raises(OSError, match="already in use"):
+            with pull_manifest_module.transfer_session(manifest, directory, state):
+                pytest.fail("A competing session acquired the destination")
+        with pull_manifest_module.output_lock(state):
+            assert not state.exists()

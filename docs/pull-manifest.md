@@ -28,6 +28,13 @@ The command exits nonzero when any file fails, the inventory is incomplete, or
 a ready dataset has no Minoc replica. Available files are still downloaded and
 checkpointed, so the next run can continue after the service recovers.
 
+Only one transfer command may use a state file or destination directory at a
+time. Competing runs exit before changing transfer state or downloading files,
+even if they use different state files for the same destination. Symlinks to the
+same paths share ownership. The locks are held through confirmation and all
+download batches, and released when the process exits. Leave the hidden `.lock`
+files in place; their presence does not mean a transfer is active.
+
 ## Transfer state
 
 The transfer state uses schema `datatrail.pull/v1`:

@@ -3,12 +3,14 @@
 import json
 import os
 import tempfile
+from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import click
 
 from dtcli.config import procure
+from dtcli.locking import output_lock
 from dtcli.utilities import cadcclient
 
 INVENTORY_SCHEMA = "datatrail.inventory/v1"
@@ -79,16 +81,15 @@ def pull_manifest(
     try:
         directory = directory or _default_directory()
         state = state or manifest.with_name(f"{manifest.stem}.pull.json")
-        transfer = prepare_transfer(manifest, directory, state)
+        with transfer_session(manifest, directory, state) as transfer:
+            pending = sum(entry["status"] != "complete" for entry in transfer["files"])
+            if pending and not force:
+                click.confirm(f"Download {pending} files?", abort=True)
+
+            if pending:
+                run_transfer(transfer, state, cores=cores, verbose=verbose)
     except (OSError, ValueError, KeyError) as error:
         raise click.ClickException(str(error)) from error
-
-    pending = sum(entry["status"] != "complete" for entry in transfer["files"])
-    if pending and not force:
-        click.confirm(f"Download {pending} files?", abort=True)
-
-    if pending:
-        run_transfer(transfer, state, cores=cores, verbose=verbose)
 
     completed = sum(entry["status"] == "complete" for entry in transfer["files"])
     failed = sum(entry["status"] == "failed" for entry in transfer["files"])
@@ -104,10 +105,28 @@ def pull_manifest(
         ctx.exit(1)
 
 
+@contextmanager
+def transfer_session(
+    manifest_path: Path, directory: Path, state_path: Path
+) -> Iterator[Dict[str, Any]]:
+    """Own transfer state and its destination until the caller finishes downloading.
+
+    Programmatic callers should prepare and run transfers through this context,
+    keeping the call to ``run_transfer`` inside it.
+    """
+    directory = directory.resolve()
+    state_path = state_path.resolve()
+    targets = {state_path, directory / "datatrail-pull"}
+    with ExitStack() as locks:
+        for target in sorted(targets):
+            locks.enter_context(output_lock(target))
+        yield prepare_transfer(manifest_path, directory, state_path)
+
+
 def prepare_transfer(
     manifest_path: Path, directory: Path, state_path: Path
 ) -> Dict[str, Any]:
-    """Load an inventory and prepare resumable transfer state."""
+    """Prepare transfer state while the caller holds ``transfer_session`` locks."""
     manifest_path = manifest_path.resolve()
     directory = directory.resolve()
     state_path = state_path.resolve()
@@ -145,7 +164,8 @@ def prepare_transfer(
 def run_transfer(
     transfer: Dict[str, Any], state_path: Path, cores: int, verbose: int = 0
 ) -> Dict[str, Any]:
-    """Download pending files and checkpoint each bounded batch."""
+    """Download bounded batches inside the caller's ``transfer_session`` context."""
+    state_path = state_path.resolve()
     directory = Path(transfer["directory"])
     pending = [entry for entry in transfer["files"] if entry["status"] != "complete"]
     for offset in range(0, len(pending), cores):
