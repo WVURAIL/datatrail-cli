@@ -232,9 +232,15 @@ def info(
             aggregate["md5sums"].add(fileinfo["md5sum"])
             aggregate["file_types"].add(fileinfo["file_type"])
             aggregate["encodings"].add(fileinfo["encoding"])
-            if aggregate["oldestmod"] is None or fileinfo["lastmod"] < aggregate["oldestmod"]:
+            if (
+                aggregate["oldestmod"] is None
+                or fileinfo["lastmod"] < aggregate["oldestmod"]
+            ):
                 aggregate["oldestmod"] = fileinfo["lastmod"]
-            if aggregate["newestmod"] is None or fileinfo["lastmod"] > aggregate["newestmod"]:
+            if (
+                aggregate["newestmod"] is None
+                or fileinfo["lastmod"] > aggregate["newestmod"]
+            ):
                 aggregate["newestmod"] = fileinfo["lastmod"]
         return [aggregate]
     return information
