@@ -14,8 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from dtcli.config import procure
-from dtcli.results import failure
 from dtcli.utilities import cadcclient, utilities
+from dtcli.utilities.results import failure
 
 logger = logging.getLogger("functions")
 

@@ -5,13 +5,13 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from dtcli.results import failure
 from dtcli.src import functions
 from dtcli.src.functions import (
     find_unregistered_datasets,
     get_unregistered_dataset,
     view_results,
 )
+from dtcli.utilities.results import failure
 
 
 def test_view_results() -> None:
