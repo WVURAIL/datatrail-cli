@@ -4,14 +4,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
-from urllib.parse import urlparse
 
 import click
 import requests
-import yaml
 from OpenSSL import crypto  # type: ignore
 
-from dtcli.config import CONFIG
+from dtcli.config import procure, validate
 
 REQUEST_TIMEOUT = 10
 SERVICE_URLS = {
@@ -25,43 +23,22 @@ def _result(ok: bool, message: str) -> Dict[str, Any]:
     return {"ok": ok, "message": message}
 
 
-def _load_config() -> Optional[Dict[str, Any]]:
-    """Load the configuration without printing its contents."""
-    try:
-        with open(CONFIG) as stream:
-            config = yaml.safe_load(stream)
-    except (OSError, UnicodeError, yaml.YAMLError):
-        return None
-    return config if isinstance(config, dict) else None
-
-
 def _check_config() -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    """Load and validate the configuration."""
-    config = _load_config()
+    """Format shared configuration checks for the readiness report."""
+    config = procure(quiet=True)
     if config is None:
         return _result(False, "Configuration could not be loaded."), None
 
-    server = config.get("server")
-    certificate = config.get("vospace_certfile")
-    site = config.get("site")
-    root_mounts = config.get("root_mounts")
-    parsed = urlparse(server) if isinstance(server, str) else None
-    valid_server = bool(parsed and parsed.scheme in ("http", "https") and parsed.netloc)
-    valid_mount = (
-        isinstance(site, str)
-        and isinstance(root_mounts, dict)
-        and isinstance(root_mounts.get(site), str)
-    )
-    if not valid_server or not isinstance(certificate, str) or not valid_mount:
+    if not validate(config):
         return _result(False, "Configuration is missing required values."), None
     return _result(True, "Configuration is ready."), config
 
 
 def _check_server(server: str) -> Dict[str, Any]:
-    """Check the central server and response shape."""
+    """Check the central server's health report."""
     try:
         response = requests.get(
-            server.rstrip("/") + "/query/dataset/scopes",
+            server.rstrip("/") + "/health/check",
             timeout=REQUEST_TIMEOUT,
         )
     except requests.RequestException:
@@ -69,13 +46,23 @@ def _check_server(server: str) -> Dict[str, Any]:
     if not 200 <= response.status_code < 300:
         return _result(False, f"Datatrail server returned HTTP {response.status_code}.")
     try:
-        scopes = response.json()
+        health = response.json()
     except (requests.JSONDecodeError, ValueError):
         return _result(False, "Datatrail server returned invalid JSON.")
-    if not isinstance(scopes, list) or not all(
-        isinstance(scope, str) for scope in scopes
+    if not isinstance(health, dict) or not isinstance(health.get("status"), str):
+        return _result(False, "Datatrail server returned an invalid health report.")
+    checks = health.get("checks")
+    if not isinstance(checks, dict) or not {"database", "api"}.issubset(checks):
+        return _result(False, "Datatrail server returned an invalid health report.")
+    if not all(
+        isinstance(check, dict) and isinstance(check.get("status"), str)
+        for check in checks.values()
     ):
-        return _result(False, "Datatrail server returned an invalid scope list.")
+        return _result(False, "Datatrail server returned an invalid health report.")
+    if health["status"] != "ok" or any(
+        check["status"] != "ok" for check in checks.values()
+    ):
+        return _result(False, "Datatrail server reported an unhealthy status.")
     return _result(True, "Datatrail server is ready.")
 
 

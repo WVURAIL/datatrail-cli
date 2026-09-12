@@ -4,11 +4,13 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 import requests
 from click.testing import CliRunner
 
 from dtcli import doctor
 from dtcli.cli import cli
+from dtcli.config import procure
 
 
 class FakeCertificate:
@@ -52,21 +54,36 @@ def _config(certfile: Path):
     }
 
 
+def _health(status="ok", database="ok", api="ok"):
+    """Create a health response matching the server endpoint."""
+    return {
+        "status": status,
+        "checks": {
+            "database": {"status": database, "response_time_ms": 7.58},
+            "api": {"status": api, "response_time_ms": 8.25},
+        },
+        "timestamp": "2026-08-31T19:57:21.140372+00:00",
+        "total_response_time_ms": 8.25,
+    }
+
+
 def test_run_checks_ready(monkeypatch, tmp_path: Path) -> None:
     """Report success when every dependency is ready."""
     certfile = tmp_path / "cert.pem"
     certfile.write_text("certificate")
     now = datetime.now(timezone.utc)
     certificate = FakeCertificate(now - timedelta(days=1), now + timedelta(days=1))
-    monkeypatch.setattr(doctor, "_load_config", lambda: _config(certfile))
+    monkeypatch.setattr(doctor, "procure", lambda **kwargs: _config(certfile))
     monkeypatch.setattr(
         doctor.crypto, "load_certificate", lambda file_type, pem: certificate
     )
 
     def fake_get(url, **kwargs):
         """Return valid server and service responses."""
-        if url.endswith("/query/dataset/scopes"):
-            return FakeResponse(payload=["test.scope"])
+        if url == "https://example.invalid/datatrail/health/check":
+            assert kwargs == {"timeout": doctor.REQUEST_TIMEOUT}
+            return FakeResponse(payload=_health())
+        assert url in doctor.SERVICE_URLS.values()
         return FakeResponse(headers={"x-vo-authenticated": "user"})
 
     monkeypatch.setattr(doctor.requests, "get", fake_get)
@@ -100,18 +117,125 @@ def test_certificate_expired(monkeypatch, tmp_path: Path) -> None:
     assert "private-value" not in result["message"]
 
 
-def test_server_requires_scope_list(monkeypatch) -> None:
-    """Reject an unexpected central server response."""
+@pytest.mark.parametrize("suffix", ["", "/"])
+def test_server_checks_health_endpoint(monkeypatch, suffix) -> None:
+    """Use the bounded health request regardless of a trailing slash."""
+    calls = []
+
+    def fake_get(url, **kwargs):
+        """Record the request and return a healthy server response."""
+        calls.append((url, kwargs))
+        return FakeResponse(payload=_health())
+
+    monkeypatch.setattr(doctor.requests, "get", fake_get)
+
+    result = doctor._check_server("https://example.invalid/datatrail" + suffix)
+
+    assert result == {"ok": True, "message": "Datatrail server is ready."}
+    assert calls == [
+        (
+            "https://example.invalid/datatrail/health/check",
+            {"timeout": doctor.REQUEST_TIMEOUT},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        [],
+        ["test.scope"],
+        "ok",
+        {},
+        {"status": True, "checks": _health()["checks"]},
+        {"status": "ok"},
+        {"status": "ok", "checks": []},
+        {"status": "ok", "checks": {}},
+        {"status": "ok", "checks": {"database": {"status": "ok"}}},
+        {"status": "ok", "checks": {"database": "ok", "api": {"status": "ok"}}},
+        {"status": "ok", "checks": {"database": {}, "api": {"status": "ok"}}},
+    ],
+)
+def test_server_rejects_malformed_health_report(monkeypatch, payload) -> None:
+    """Reject malformed health reports, including the old scopes payload."""
     monkeypatch.setattr(
         doctor.requests,
         "get",
-        lambda url, **kwargs: FakeResponse(payload={"scopes": ["test.scope"]}),
+        lambda url, **kwargs: FakeResponse(payload=payload),
     )
 
     result = doctor._check_server("https://example.invalid/datatrail")
 
     assert result["ok"] is False
-    assert result["message"] == "Datatrail server returned an invalid scope list."
+    assert result["message"] == "Datatrail server returned an invalid health report."
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _health(status="error"),
+        _health(database="unhealthy"),
+        _health(api="degraded"),
+    ],
+)
+def test_server_rejects_unhealthy_status(monkeypatch, payload) -> None:
+    """Fail when the server or a component is unhealthy despite HTTP 200."""
+    monkeypatch.setattr(
+        doctor.requests, "get", lambda url, **kwargs: FakeResponse(payload=payload)
+    )
+
+    result = doctor._check_server("https://example.invalid/datatrail")
+
+    assert result == {
+        "ok": False,
+        "message": "Datatrail server reported an unhealthy status.",
+    }
+
+
+def test_server_rejects_http_error(monkeypatch) -> None:
+    """A healthy-looking payload cannot override a failed HTTP response."""
+    monkeypatch.setattr(
+        doctor.requests,
+        "get",
+        lambda url, **kwargs: FakeResponse(status_code=503, payload=_health()),
+    )
+
+    result = doctor._check_server("https://example.invalid/datatrail")
+
+    assert result == {"ok": False, "message": "Datatrail server returned HTTP 503."}
+
+
+def test_server_rejects_invalid_json(monkeypatch) -> None:
+    """Hide response contents when JSON decoding fails."""
+
+    class InvalidResponse(FakeResponse):
+        """Response that cannot be decoded as JSON."""
+
+        def json(self):
+            """Raise a decoding error containing private response text."""
+            raise ValueError("private-response")
+
+    monkeypatch.setattr(doctor.requests, "get", lambda url, **kwargs: InvalidResponse())
+
+    result = doctor._check_server("https://example.invalid/datatrail")
+
+    assert result == {"ok": False, "message": "Datatrail server returned invalid JSON."}
+
+
+@pytest.mark.parametrize("error", [requests.Timeout, requests.ConnectionError])
+def test_server_hides_request_errors(monkeypatch, error) -> None:
+    """Report network failures without exposing the request URL."""
+
+    def fail_request(url, **kwargs):
+        """Raise a network error containing sensitive request details."""
+        raise error(url)
+
+    monkeypatch.setattr(doctor.requests, "get", fail_request)
+
+    result = doctor._check_server("https://user:secret@example.invalid/datatrail")
+
+    assert result == {"ok": False, "message": "Datatrail server request failed."}
 
 
 def test_service_requires_authentication_header(monkeypatch) -> None:
@@ -133,7 +257,7 @@ def test_doctor_json_hides_request_details(monkeypatch, tmp_path: Path) -> None:
     config = _config(certfile)
     config["server"] = "https://user:secret@example.invalid/datatrail"
     monkeypatch.setattr("dtcli.cli.check_version", lambda: None)
-    monkeypatch.setattr(doctor, "_load_config", lambda: config)
+    monkeypatch.setattr(doctor, "procure", lambda **kwargs: config)
     monkeypatch.setattr(
         doctor.crypto, "load_certificate", lambda file_type, pem: certificate
     )
@@ -152,3 +276,33 @@ def test_doctor_json_hides_request_details(monkeypatch, tmp_path: Path) -> None:
     assert report["checks"]["server"]["ok"] is False
     assert "secret" not in result.output
     assert "user:" not in result.output
+
+
+@pytest.mark.parametrize("contents", [None, "server: [private-value", "[]", "{}"])
+def test_doctor_json_with_invalid_config(monkeypatch, tmp_path, contents) -> None:
+    """Use the shared loader without logs or network probes on config failure."""
+    configfile = tmp_path / "config.yaml"
+    if contents is not None:
+        configfile.write_text(contents)
+    monkeypatch.setattr("dtcli.cli.check_version", lambda: None)
+    monkeypatch.setattr(
+        doctor, "procure", lambda **kwargs: procure(configfile, **kwargs)
+    )
+
+    def unexpected_request(*args, **kwargs):
+        """Fail the test if a failed configuration triggers a network probe."""
+        pytest.fail("Network probes must be skipped when configuration fails.")
+
+    monkeypatch.setattr(doctor.requests, "get", unexpected_request)
+
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+
+    assert result.exit_code == 1
+    report = json.loads(result.output)
+    assert report["ok"] is False
+    assert all(check["ok"] is False for check in report["checks"].values())
+    assert "private-value" not in result.output
+    assert str(configfile) not in result.output
+    assert report["checks"]["server"]["message"] == (
+        "Not checked because configuration failed."
+    )
