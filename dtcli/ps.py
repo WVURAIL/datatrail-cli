@@ -10,9 +10,9 @@ from rich.console import Console
 from rich.table import Table
 
 from dtcli.ls import list
-from dtcli.results import failure
 from dtcli.src import functions
 from dtcli.utilities import cadcclient
+from dtcli.utilities.results import failure
 from dtcli.utilities.utilities import check_canfar_status, set_log_level, validate_scope
 
 logger = logging.getLogger("ps")
