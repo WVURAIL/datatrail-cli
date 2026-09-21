@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from dtcli.cli import cli as datatrail
+from dtcli.utilities import utilities
 
 
 @pytest.fixture(scope="module")
@@ -40,12 +41,15 @@ def list_specific_files(directory):
 
 
 @pytest.fixture
-def runner() -> CliRunner:
+def runner(request, monkeypatch) -> CliRunner:
     """Click CLI runner for testing.
 
     Returns:
         (CliRunner) -> None:
     """
+    if request.node.get_closest_marker("cadc") is None:
+        request.getfixturevalue("datatrail_api")
+        monkeypatch.setattr(utilities, "cli_is_latest_release", lambda: True)
     return CliRunner()
 
 
